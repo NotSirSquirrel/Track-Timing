@@ -158,6 +158,7 @@ $('camTg').onchange=async e=>{
 };
 function stopCam(){if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;prev=null;$('ph').classList.remove('hide');}
 function loop(){const pv=$('pv');const f=()=>{if(!stream)return;try{frame();}catch(e){}pv.requestVideoFrameCallback?pv.requestVideoFrameCallback(f):requestAnimationFrame(f);};f();}
+let bgS=null,bgX=-1;
 const cv=document.createElement('canvas');cv.width=160;cv.height=90;const cx=cv.getContext('2d',{willReadFrequently:true});
 function frame(){
   const pv=$('pv');if(pv.readyState<2)return;
@@ -166,13 +167,16 @@ function frame(){
   for(let i=0,j=0;j<14400;i+=4,j++)g[j]=(d[i]*3+d[i+1]*6+d[i+2])/10|0;
   const t=Date.now();
   if(prev){
-    let sum=0,c=0,n=0;const lx=viewMode()==='none'?cfg.line:100-cfg.line,x0=Math.max(0,Math.round(lx/100*160)-2),x1=x0+4;
-    for(let y=0;y<90;y++)for(let x=0;x<160;x++){const a=Math.abs(g[y*160+x]-prev[y*160+x]);sum+=a;if(x>=x0&&x<x1){n++;if(a>28)c++;}}
-    onFrame(t,sum/14400,c/n);
+    let ch=0,c=0,n=0;const lx=viewMode()==='none'?cfg.line:100-cfg.line,x0=Math.max(0,Math.min(154,Math.round(lx/100*160)-3)),x1=x0+6;
+    if(!bgS||bgX!==x0){bgS=new Float32Array(540);bgX=x0;for(let y=0;y<90;y++)for(let i=0;i<6;i++)bgS[y*6+i]=g[y*160+x0+i];}
+    for(let y=0;y<90;y++)for(let x=0;x<160;x++){if(Math.abs(g[y*160+x]-prev[y*160+x])>20)ch++;if(x>=x0&&x<x1){n++;if(Math.abs(g[y*160+x]-bgS[y*6+x-x0])>30)c++;}}
+    const occ=c/n;
+    if(occ<.12)for(let y=0;y<90;y++)for(let i=0;i<6;i++){const k=y*6+i;bgS[k]+=(g[y*160+x0+i]-bgS[k])*.04;}
+    onFrame(t,ch/14400,occ);
   }
   prev=g;
 }
-const thr=()=>.75-cfg.sens*.065;
+const thr=()=>.6-cfg.sens*.055;
 function onFrame(t,full,strip){
   hist.push([t,full]);if(hist.length>600)hist.shift();if(state==='armed')autoCheck(t,full);
   if(++fc%6===0)$('act').textContent='line '+Math.round(strip*100)+'%';
@@ -196,7 +200,7 @@ function addSplit(t,imgFn,dev){
 function reaction(){
   const pre=hist.filter(h=>h[0]>goA-1800&&h[0]<goA-150).map(h=>h[1]);
   if(pre.length<5)return{err:'no camera data'};
-  const m=pre.reduce((a,b)=>a+b)/pre.length,sd=Math.sqrt(pre.reduce((a,b)=>a+(b-m)**2,0)/pre.length),th=Math.max(m+4*sd,m+1.5);
+  const m=pre.reduce((a,b)=>a+b)/pre.length,sd=Math.sqrt(pre.reduce((a,b)=>a+(b-m)**2,0)/pre.length),th=Math.max(m+4*sd,m+.01);
   const post=hist.filter(h=>h[0]>=goA-150);
   for(let i=1;i<post.length;i++)if(post[i-1][1]>th&&post[i][1]>th)return{rt:(post[i-1][0]-goA)/1000};
   return{err:'no movement seen'};
@@ -267,12 +271,12 @@ function tick(){
   $('pw').classList.toggle('bad',!!moving);
   if(camErr){b.textContent=camErr;b.className='bad';}
   else if(moving){b.textContent='Phone not still!';b.className='';}
-  else{b.className='';b.textContent=cfg.mode==='single'?'Ready · single phone':(cfg.mode==='start'?'Start phone':'Finish phone')+(cfg.code?' · '+peersN+' connected':' · set a pair code in settings');}
+  else{b.className='';b.textContent=cfg.mode==='single'?'Ready · single phone':(cfg.mode==='start'?'Start phone':'Finish phone')+(cfg.code?' · '+peersN+' connected'+(cfg.mode==='finish'?(bestRtt<1e8?' · synced ±'+Math.round(bestRtt/2)+' ms':' · syncing…'):''):' · set a pair code in settings');}
   requestAnimationFrame(tick);
 }
 
 // ---------- two-phone pairing
-const sync=()=>{bestRtt=1e9;for(let i=0;i<10;i++)setTimeout(()=>room&&room.emit('ping',{t1:Date.now()}),i*300);};
+const sync=()=>{for(let i=0;i<10;i++)setTimeout(()=>room&&room.emit('ping',{t1:Date.now()}),i*300);};
 async function connect(){
   const code=(cfg.code||'').toLowerCase().replace(/[^a-z0-9]/g,'');
   const c=$('conn');
@@ -282,7 +286,7 @@ async function connect(){
     const r=window.claude?await claude.use('room'):peerShim();
     if(!r){c.textContent='Pairing isn’t available here. Sign in to Claude on both phones.';return;}
     room=await r.join('rep'+code);joined=code;
-    room.onPeers(p=>{peersN=p.peers.length;c.textContent='Code '+code+': '+peersN+' phone'+(peersN===1?'':'s')+' connected.';});
+    room.onPeers(p=>{peersN=p.peers.length;c.textContent='Code '+code+': '+peersN+' phone'+(peersN===1?'':'s')+' connected.';if(cfg.mode==='finish'&&peersN>1)sync();});
     room.on('ping',m=>{if(cfg.mode==='start'&&!m.sameTab)room.emit('pong',{t1:m.data.t1,t2:Date.now()});});
     room.on('pong',m=>{if(cfg.mode!=='finish'||m.sameTab)return;const t3=Date.now(),rtt=t3-m.data.t1;if(rtt<bestRtt){bestRtt=rtt;offset=m.data.t2-(m.data.t1+t3)/2;}});
     room.on('go',m=>{if(cfg.mode!=='finish'||m.sameTab)return;goA=m.data.goA;splits=[];open={};state='count';render();});
@@ -394,11 +398,11 @@ function autoCheck(t,full){
   const pre=hist.filter(h=>h[0]>t-1200&&h[0]<t-60).map(h=>h[1]);if(pre.length<6)return;
   const m=pre.reduce((a,b)=>a+b)/pre.length,sd=Math.sqrt(pre.reduce((a,b)=>a+(b-m)**2,0)/pre.length);
   if(!aReady){
-    if(m<2.5&&sd<1.2&&full<3){if(!calmFrom)calmFrom=t;}else calmFrom=0;
+    if(m<.01&&sd<.006&&full<.02){if(!calmFrom)calmFrom=t;}else calmFrom=0;
     if((calmFrom&&t-calmFrom>1200)||t-armT>6000){aReady=true;$('tl').textContent='Ready · go when you like';try{navigator.vibrate(80);}catch(e){}}
     return;
   }
-  if(full>Math.max(m+4*sd,m+3)){if(!aHit)aT=t;if(++aHit>=2){aHit=0;goA=aT;state='run';if(room&&cfg.mode==='start')room.emit('go',{goA});render();}}else aHit=0;
+  if(full>Math.max(m+5*sd,m+(.02-cfg.sens*.0015))){if(!aHit)aT=t;if(++aHit>=2){aHit=0;goA=aT;state='run';if(room&&cfg.mode==='start')room.emit('go',{goA});render();}}else aHit=0;
 }
 function repDone(){
   if(cfg.mode==='finish'){state='idle';return;}
@@ -467,6 +471,7 @@ function resetRep(){
   if(cfg.sm==='auto'&&cfg.mode!=='finish'&&stream)armAuto();else toast('Reset. Ready for the next rep.');
 }
 $('rs').onclick=resetRep;
+setInterval(()=>{if(cfg.mode==='finish'&&room&&peersN>1)sync();},5000);
 $('rst').onclick=()=>{if(confirm('Reset all settings to their defaults? Your saved runs are kept.')){try{localStorage.removeItem('cfg');}catch(e){}location.reload();}};
 document.querySelector('[data-k=face]').addEventListener('change',()=>{if(stream){stopCam();$('camTg').checked=false;toast('Camera switched. Turn the camera back on.');}});
 applyCfg();tick();if(cfg.mode!=='single'&&cfg.code)connect();
